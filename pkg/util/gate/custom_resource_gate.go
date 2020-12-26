@@ -27,10 +27,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/discovery"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
-	"sigs.k8s.io/controller-runtime/pkg/client/config"
 )
 
 const (
@@ -46,10 +46,10 @@ var (
 
 func init() {
 	_ = apis.AddToScheme(internalScheme)
-	cfg, err := config.GetConfig()
-	if err == nil {
-		discoveryClient = discovery.NewDiscoveryClientForConfigOrDie(cfg)
-	}
+}
+
+func Init(cfg *rest.Config) {
+	discoveryClient = discovery.NewDiscoveryClientForConfigOrDie(cfg)
 }
 
 // ResourceEnabled help runnable check if the custom resource is valid and enabled

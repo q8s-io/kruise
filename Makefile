@@ -1,6 +1,7 @@
-
 # Image URL to use all building/pushing image targets
 IMG ?= openkruise/kruise-manager:test
+# Platforms to build the image for
+PLATFORMS ?= linux/amd64,linux/arm64,linux/arm
 # Produce CRDs that work for API servers that supports v1beta1 CRD and conversion, requires k8s 1.13 or later.
 CRD_OPTIONS ?= "crd"
 
@@ -40,6 +41,7 @@ uninstall: manifests
 deploy: manifests
 	cd config/manager && kustomize edit set image controller=${IMG}
 	kustomize build config/default | kubectl apply -f -
+	echo "resources:\n- manager.yaml" > config/manager/kustomization.yaml
 
 # Generate manifests e.g. CRD, RBAC etc.
 manifests: controller-gen
@@ -66,6 +68,10 @@ docker-build: test
 docker-push:
 	docker push ${IMG}
 
+# Build and push the multiarchitecture docker images and manifest.
+docker-multiarch:
+	docker buildx build --pull --no-cache --platform=$(PLATFORMS) --push . -t $(IMG)
+
 # find or download controller-gen
 # download controller-gen if necessary
 controller-gen:
@@ -78,9 +84,9 @@ ifeq (, $(shell which controller-gen-kruise-2))
 	echo "replace sigs.k8s.io/controller-tools => github.com/openkruise/controller-tools v0.2.9-kruise.2" >> go.mod ;\
 	go get sigs.k8s.io/controller-tools/cmd/controller-gen@v0.2.9 ;\
 	rm -rf $$CONTROLLER_GEN_TMP_DIR ;\
-	mv $(GOPATH)/bin/controller-gen $(GOPATH)/bin/controller-gen-kruise-2 ;\
+	mv $(GOBIN)/controller-gen $(GOBIN)/controller-gen-kruise-2 ;\
 	}
-CONTROLLER_GEN=$(GOPATH)/bin/controller-gen-kruise-2
+CONTROLLER_GEN=$(GOBIN)/controller-gen-kruise-2
 else
 CONTROLLER_GEN=$(shell which controller-gen-kruise-2)
 endif

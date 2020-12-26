@@ -175,7 +175,7 @@ func (a *StatefulSetAdapter) PostUpdate(ud *alpha1.UnitedDeployment, obj runtime
 // IsExpected checks the subset is the expected revision or not.
 // The revision label can tell the current subset revision.
 func (a *StatefulSetAdapter) IsExpected(obj metav1.Object, revision string) bool {
-	return obj.GetLabels()[appsv1.ControllerRevisionHashLabelKey] != revision
+	return obj.GetLabels()[alpha1.ControllerRevisionHashLabelKey] != revision
 }
 
 func (a *StatefulSetAdapter) getStatefulSetPods(set *appsv1.StatefulSet) ([]*corev1.Pod, error) {
@@ -212,7 +212,9 @@ func (a *StatefulSetAdapter) getStatefulSetPods(set *appsv1.StatefulSet) ([]*cor
 func calculateUpdatedReplicas(podList []*corev1.Pod, updatedRevision string) (updatedReplicas, updatedReadyReplicas int32) {
 	for _, pod := range podList {
 		revision := getRevision(&pod.ObjectMeta)
-		if revision == updatedRevision {
+
+		// Only count pods that are updated and are not terminating
+		if revision == updatedRevision && pod.GetDeletionTimestamp() == nil {
 			updatedReplicas++
 			if podutil.IsPodReady(pod) {
 				updatedReadyReplicas++
@@ -223,7 +225,7 @@ func calculateUpdatedReplicas(podList []*corev1.Pod, updatedRevision string) (up
 	return
 }
 
-// deleteStucckPods tries to work around the blocking issue https://github.com/kubernetes/kubernetes/issues/67250
+// deleteStuckPods tries to work around the blocking issue https://github.com/kubernetes/kubernetes/issues/67250
 func (a *StatefulSetAdapter) deleteStuckPods(set *appsv1.StatefulSet, revision string, partition int32) error {
 	pods, err := a.getStatefulSetPods(set)
 	if err != nil {

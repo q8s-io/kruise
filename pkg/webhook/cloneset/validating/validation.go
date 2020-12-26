@@ -7,6 +7,7 @@ import (
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	clonesetcore "github.com/openkruise/kruise/pkg/controller/cloneset/core"
 	"github.com/openkruise/kruise/pkg/util"
+	"github.com/openkruise/kruise/pkg/webhook/util/convertor"
 	v1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apimachineryvalidation "k8s.io/apimachinery/pkg/api/validation"
@@ -14,20 +15,23 @@ import (
 	unversionedvalidation "k8s.io/apimachinery/pkg/apis/meta/v1/validation"
 	"k8s.io/apimachinery/pkg/types"
 	intstrutil "k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	appsvalidation "k8s.io/kubernetes/pkg/apis/apps/validation"
-	"k8s.io/kubernetes/pkg/apis/core"
-	corev1 "k8s.io/kubernetes/pkg/apis/core/v1"
 	apivalidation "k8s.io/kubernetes/pkg/apis/core/validation"
 )
 
-func (h *CloneSetCreateUpdateHandler) validateCloneSet(cloneSet *appsv1alpha1.CloneSet) field.ErrorList {
+func (h *CloneSetCreateUpdateHandler) validateCloneSet(cloneSet, oldCloneSet *appsv1alpha1.CloneSet) field.ErrorList {
 	allErrs := apivalidation.ValidateObjectMeta(&cloneSet.ObjectMeta, true, apimachineryvalidation.NameIsDNSSubdomain, field.NewPath("metadata"))
-	allErrs = append(allErrs, h.validateCloneSetSpec(&cloneSet.Spec, &cloneSet.ObjectMeta, field.NewPath("spec"))...)
+	var oldCloneSetSpec *appsv1alpha1.CloneSetSpec
+	if oldCloneSet != nil {
+		oldCloneSetSpec = &oldCloneSet.Spec
+	}
+	allErrs = append(allErrs, h.validateCloneSetSpec(&cloneSet.Spec, oldCloneSetSpec, &cloneSet.ObjectMeta, field.NewPath("spec"))...)
 	return allErrs
 }
 
-func (h *CloneSetCreateUpdateHandler) validateCloneSetSpec(spec *appsv1alpha1.CloneSetSpec, metadata *metav1.ObjectMeta, fldPath *field.Path) field.ErrorList {
+func (h *CloneSetCreateUpdateHandler) validateCloneSetSpec(spec, oldSpec *appsv1alpha1.CloneSetSpec, metadata *metav1.ObjectMeta, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 
 	allErrs = append(allErrs, apivalidation.ValidateNonnegativeField(int64(*spec.Replicas), fldPath.Child("replicas"))...)
@@ -44,7 +48,7 @@ func (h *CloneSetCreateUpdateHandler) validateCloneSetSpec(spec *appsv1alpha1.Cl
 	if err != nil {
 		allErrs = append(allErrs, field.Invalid(fldPath.Child("selector"), spec.Selector, ""))
 	} else {
-		coreTemplate, err := convertPodTemplateSpec(&spec.Template)
+		coreTemplate, err := convertor.ConvertPodTemplateSpec(&spec.Template)
 		if err != nil {
 			allErrs = append(allErrs, field.Invalid(fldPath.Root(), spec.Template, fmt.Sprintf("Convert_v1_PodTemplateSpec_To_core_PodTemplateSpec failed: %v", err)))
 			return allErrs
@@ -59,13 +63,18 @@ func (h *CloneSetCreateUpdateHandler) validateCloneSetSpec(spec *appsv1alpha1.Cl
 		allErrs = append(allErrs, field.Forbidden(fldPath.Child("template", "spec", "activeDeadlineSeconds"), "activeDeadlineSeconds in cloneset is not Supported"))
 	}
 
-	allErrs = append(allErrs, h.validateScaleStrategy(&spec.ScaleStrategy, metadata, fldPath.Child("scaleStrategy"))...)
+	var oldScaleStrategy *appsv1alpha1.CloneSetScaleStrategy
+	if oldSpec != nil {
+		oldScaleStrategy = &oldSpec.ScaleStrategy
+	}
+
+	allErrs = append(allErrs, h.validateScaleStrategy(&spec.ScaleStrategy, oldScaleStrategy, metadata, fldPath.Child("scaleStrategy"))...)
 	allErrs = append(allErrs, h.validateUpdateStrategy(&spec.UpdateStrategy, int(*spec.Replicas), fldPath.Child("updateStrategy"))...)
 
 	return allErrs
 }
 
-func (h *CloneSetCreateUpdateHandler) validateScaleStrategy(strategy *appsv1alpha1.CloneSetScaleStrategy, metadata *metav1.ObjectMeta, fldPath *field.Path) field.ErrorList {
+func (h *CloneSetCreateUpdateHandler) validateScaleStrategy(strategy, oldStrategy *appsv1alpha1.CloneSetScaleStrategy, metadata *metav1.ObjectMeta, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 
 	if list := util.CheckDuplicate(strategy.PodsToDelete); len(list) > 0 {
@@ -73,7 +82,13 @@ func (h *CloneSetCreateUpdateHandler) validateScaleStrategy(strategy *appsv1alph
 		return allErrs
 	}
 
-	for _, podName := range strategy.PodsToDelete {
+	podsToDeleteSet := sets.NewString(strategy.PodsToDelete...)
+
+	if oldStrategy != nil && len(oldStrategy.PodsToDelete) > 0 {
+		podsToDeleteSet.Delete(oldStrategy.PodsToDelete...)
+	}
+
+	for _, podName := range podsToDeleteSet.List() {
 		pod := &v1.Pod{}
 		if err := h.Client.Get(context.TODO(), types.NamespacedName{Namespace: metadata.Namespace, Name: podName}, pod); err != nil {
 			allErrs = append(allErrs, field.Invalid(fldPath.Child("podsToDelete"), podName, fmt.Sprintf("find pod %s failed: %v", podName, err)))
@@ -102,7 +117,12 @@ func (h *CloneSetCreateUpdateHandler) validateUpdateStrategy(strategy *appsv1alp
 			appsv1alpha1.InPlaceOnlyCloneSetUpdateStrategyType)))
 	}
 
-	allErrs = append(allErrs, apivalidation.ValidateNonnegativeField(int64(*strategy.Partition), fldPath.Child("partition"))...)
+	partition, err := intstrutil.GetValueFromIntOrPercent(strategy.Partition, replicas, true)
+	if err != nil {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("partition"), strategy.Partition.String(),
+			fmt.Sprintf("failed getValueFromIntOrPercent for partition: %v", err)))
+	}
+	allErrs = append(allErrs, apivalidation.ValidateNonnegativeField(int64(partition), fldPath.Child("partition"))...)
 
 	if err := strategy.PriorityStrategy.FieldsValidation(); err != nil {
 		allErrs = append(allErrs, field.Required(fldPath.Child("priorityStrategy"), err.Error()))
@@ -130,7 +150,7 @@ func (h *CloneSetCreateUpdateHandler) validateUpdateStrategy(strategy *appsv1alp
 		}
 		if strategy.Type == appsv1alpha1.InPlaceOnlyCloneSetUpdateStrategyType && maxSurge > 0 {
 			allErrs = append(allErrs, field.Invalid(fldPath.Child("maxSurge"), strategy.MaxSurge.String(),
-				fmt.Sprintf("can not use maxSurge with strategy type InPlaceOnly")))
+				"can not use maxSurge with strategy type InPlaceOnly"))
 		}
 	}
 
@@ -140,14 +160,6 @@ func (h *CloneSetCreateUpdateHandler) validateUpdateStrategy(strategy *appsv1alp
 	}
 
 	return allErrs
-}
-
-func convertPodTemplateSpec(template *v1.PodTemplateSpec) (*core.PodTemplateSpec, error) {
-	coreTemplate := &core.PodTemplateSpec{}
-	if err := corev1.Convert_v1_PodTemplateSpec_To_core_PodTemplateSpec(template.DeepCopy(), coreTemplate, nil); err != nil {
-		return nil, err
-	}
-	return coreTemplate, nil
 }
 
 func (h *CloneSetCreateUpdateHandler) validateCloneSetUpdate(cloneSet, oldCloneSet *appsv1alpha1.CloneSet) field.ErrorList {
@@ -170,6 +182,6 @@ func (h *CloneSetCreateUpdateHandler) validateCloneSetUpdate(cloneSet, oldCloneS
 		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec"), err.Error()))
 	}
 
-	allErrs = append(allErrs, h.validateCloneSet(cloneSet)...)
+	allErrs = append(allErrs, h.validateCloneSet(cloneSet, oldCloneSet)...)
 	return allErrs
 }

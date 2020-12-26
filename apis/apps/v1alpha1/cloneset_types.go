@@ -89,10 +89,12 @@ type CloneSetUpdateStrategy struct {
 	// Type indicates the type of the CloneSetUpdateStrategy.
 	// Default is ReCreate.
 	Type CloneSetUpdateStrategyType `json:"type,omitempty"`
-	// Partition is the desired number of pods in old revisions. It means when partition
-	// is set during pods updating, (replicas - partition) number of pods will be updated.
+	// Partition is the desired number of pods in old revisions.
+	// Value can be an absolute number (ex: 5) or a percentage of desired pods (ex: 10%).
+	// Absolute number is calculated from percentage by rounding up by default.
+	// It means when partition is set during pods updating, (replicas - partition value) number of pods will be updated.
 	// Default value is 0.
-	Partition *int32 `json:"partition,omitempty"`
+	Partition *intstr.IntOrString `json:"partition,omitempty"`
 	// The maximum number of pods that can be unavailable during the update.
 	// Value can be an absolute number (ex: 5) or a percentage of desired pods (ex: 10%).
 	// Absolute number is calculated from percentage by rounding up by default.
@@ -236,6 +238,8 @@ type CloneSetCondition struct {
 }
 
 // +genclient
+// +genclient:method=GetScale,verb=get,subresource=scale,result=k8s.io/api/autoscaling/v1.Scale
+// +genclient:method=UpdateScale,verb=update,subresource=scale,input=k8s.io/api/autoscaling/v1.Scale,result=k8s.io/api/autoscaling/v1.Scale
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas,selectorpath=.status.labelSelector

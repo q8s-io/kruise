@@ -64,6 +64,7 @@ import (
 	kruiseExpectations "github.com/openkruise/kruise/pkg/util/expectations"
 	"github.com/openkruise/kruise/pkg/util/gate"
 	"github.com/openkruise/kruise/pkg/util/inplaceupdate"
+	"github.com/openkruise/kruise/pkg/util/ratelimiter"
 )
 
 func init() {
@@ -179,7 +180,9 @@ func newReconciler(mgr manager.Manager) (reconcile.Reconciler, error) {
 // add adds a new Controller to mgr with r as the reconcile.Reconciler
 func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	// Create a new controller
-	c, err := controller.New("daemonset-controller", mgr, controller.Options{Reconciler: r, MaxConcurrentReconciles: concurrentReconciles})
+	c, err := controller.New("daemonset-controller", mgr, controller.Options{
+		Reconciler: r, MaxConcurrentReconciles: concurrentReconciles,
+		RateLimiter: ratelimiter.DefaultControllerRateLimiter()})
 	if err != nil {
 		return err
 	}
@@ -323,10 +326,6 @@ func (dsc *ReconcileDaemonSet) getDaemonPods(ds *appsv1alpha1.DaemonSet) ([]*cor
 
 func (dsc *ReconcileDaemonSet) syncDaemonSet(request reconcile.Request) (reconcile.Result, error) {
 	dsKey := request.NamespacedName.String()
-	startTime := time.Now()
-	defer func() {
-		klog.V(4).Infof("Finished syncing daemon set %s/%s (%v)", request.NamespacedName.Namespace, request.NamespacedName.Name, time.Since(startTime))
-	}()
 	ds := &appsv1alpha1.DaemonSet{}
 	err := dsc.client.Get(context.TODO(), request.NamespacedName, ds)
 	if err != nil {
@@ -537,7 +536,7 @@ func (dsc *ReconcileDaemonSet) updateDaemonSetStatus(ds *appsv1alpha1.DaemonSet,
 			if scheduled {
 				currentNumberScheduled++
 				// Sort the daemon pods by creation time, so that the oldest is first.
-				daemonPods, _ := nodeToDaemonPods[node.Name]
+				daemonPods := nodeToDaemonPods[node.Name]
 				sort.Sort(podByCreationTimestampAndPhase(daemonPods))
 				pod := daemonPods[0]
 				if podutil.IsPodReady(pod) {
@@ -623,10 +622,10 @@ func (dsc *ReconcileDaemonSet) manage(ds *appsv1alpha1.DaemonSet, hash string) (
 					klog.Errorf("updateDaemonSetStatus failed in first deploy process")
 				}
 			}
-			unDelpoyedNum := ds.Status.DesiredNumberScheduled - ds.Status.CurrentNumberScheduled
+			unDeployedNum := ds.Status.DesiredNumberScheduled - ds.Status.CurrentNumberScheduled
 			// node count changes or daemonSet in first deploy.
 			isFirstDeployed, ok := ds.Labels[IsFirstDeployedFlag]
-			if unDelpoyedNum > 0 && (!ok || ok && isFirstDeployed != "false") {
+			if unDeployedNum > 0 && (!ok || ok && isFirstDeployed != "false") {
 				if int32(len(nodesNeedingDaemonPods)) >= partition {
 					sort.Strings(nodesNeedingDaemonPods)
 					nodesNeedingDaemonPods = append(nodesNeedingDaemonPods[:0], nodesNeedingDaemonPods[partition:]...)
@@ -923,17 +922,25 @@ func (dsc *ReconcileDaemonSet) getNodesToDaemonPods(ds *appsv1alpha1.DaemonSet) 
 		}
 		node := &corev1.Node{}
 		err = dsc.client.Get(context.TODO(), types.NamespacedName{Name: nodeName}, node)
-		if err == nil && CanNodeBeDeployed(node, ds) {
+		if err != nil {
+			klog.V(4).Infof("get node %s failed: %v", nodeName, err)
+			if errors.IsNotFound(err) {
+				// Unable to find the target node in the cluster, which means it has been drained from cluster,
+				// we still add this node to nodeToDaemonPods in order that the daemon pods that failed to be
+				// scheduled on it will be removed in later reconcile loop.
+				nodeToDaemonPods[nodeName] = append(nodeToDaemonPods[nodeName], pod)
+			}
+			continue
+		}
+		if CanNodeBeDeployed(node, ds) {
 			nodeToDaemonPods[nodeName] = append(nodeToDaemonPods[nodeName], pod)
-		} else {
-			klog.V(4).Infof("get node: %s failed", nodeName)
 		}
 	}
 
 	return nodeToDaemonPods, nil
 }
 
-// CanNodeBeDployed checks if the node is ready for new daemon Pod.
+// CanNodeBeDeployed checks if the node is ready for new daemon Pod.
 func CanNodeBeDeployed(node *corev1.Node, ds *appsv1alpha1.DaemonSet) bool {
 	isNodeScheduable := true
 	isNodeReady := true

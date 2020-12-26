@@ -15,11 +15,12 @@ import (
 	unversionedvalidation "k8s.io/apimachinery/pkg/apis/meta/v1/validation"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	intstrutil "k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	appsvalidation "k8s.io/kubernetes/pkg/apis/apps/validation"
-	"k8s.io/kubernetes/pkg/apis/core"
-	corev1 "k8s.io/kubernetes/pkg/apis/core/v1"
 	apivalidation "k8s.io/kubernetes/pkg/apis/core/validation"
+
+	"github.com/openkruise/kruise/pkg/webhook/util/convertor"
 )
 
 var inPlaceUpdateTemplateSpecPatchRexp = regexp.MustCompile("/containers/([0-9]+)/image")
@@ -35,6 +36,19 @@ func validateStatefulSetSpec(spec *appsv1beta1.StatefulSetSpec, fldPath *field.P
 	case apps.OrderedReadyPodManagement, apps.ParallelPodManagement:
 	default:
 		allErrs = append(allErrs, field.Invalid(fldPath.Child("podManagementPolicy"), spec.PodManagementPolicy, fmt.Sprintf("must be '%s' or '%s'", apps.OrderedReadyPodManagement, apps.ParallelPodManagement)))
+	}
+
+	if spec.ReserveOrdinals != nil {
+		orders := sets.NewInt()
+		for _, i := range spec.ReserveOrdinals {
+			if i < 0 || i >= int(*spec.Replicas) {
+				allErrs = append(allErrs, field.Invalid(fldPath.Root(), spec.Template, fmt.Sprintf("reserveOrdinals contains %d which must be 0<=order<replicas", i)))
+			}
+			if orders.Has(i) {
+				allErrs = append(allErrs, field.Invalid(fldPath.Root(), spec.Template, fmt.Sprintf("reserveOrdinals contains duplicated %d", i)))
+			}
+			orders.Insert(i)
+		}
 	}
 
 	switch spec.UpdateStrategy.Type {
@@ -64,7 +78,7 @@ func validateStatefulSetSpec(spec *appsv1beta1.StatefulSetSpec, fldPath *field.P
 				allErrs = append(allErrs,
 					field.Invalid(fldPath.Child("updateStrategy").Child("rollingUpdate").Child("minReadySeconds"),
 						*spec.UpdateStrategy.RollingUpdate.MinReadySeconds,
-						fmt.Sprintf("must be no more than 300 seconds")))
+						"must be no more than 300 seconds"))
 			}
 
 			// validate the `maxUnavailable` field
@@ -108,7 +122,7 @@ func validateStatefulSetSpec(spec *appsv1beta1.StatefulSetSpec, fldPath *field.P
 	if err != nil {
 		allErrs = append(allErrs, field.Invalid(fldPath.Child("selector"), spec.Selector, ""))
 	} else {
-		coreTemplate, err := convertPodTemplateSpec(&spec.Template)
+		coreTemplate, err := convertor.ConvertPodTemplateSpec(&spec.Template)
 		if err != nil {
 			allErrs = append(allErrs, field.Invalid(fldPath.Root(), spec.Template, fmt.Sprintf("Convert_v1_PodTemplateSpec_To_core_PodTemplateSpec failed: %v", err)))
 			return allErrs
@@ -220,23 +234,19 @@ func ValidateStatefulSetUpdate(statefulSet, oldStatefulSet *appsv1beta1.Stateful
 	restoreStrategy := statefulSet.Spec.UpdateStrategy
 	statefulSet.Spec.UpdateStrategy = oldStatefulSet.Spec.UpdateStrategy
 
+	restoreReserveOrdinals := statefulSet.Spec.ReserveOrdinals
+	statefulSet.Spec.ReserveOrdinals = oldStatefulSet.Spec.ReserveOrdinals
+
 	if !apiequality.Semantic.DeepEqual(statefulSet.Spec, oldStatefulSet.Spec) {
-		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec"), "updates to statefulset spec for fields other than 'replicas', 'template', and 'updateStrategy' are forbidden"))
+		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec"), "updates to statefulset spec for fields other than 'replicas', 'template', 'reserveOrdinals', and 'updateStrategy' are forbidden"))
 	}
 	statefulSet.Spec.Replicas = restoreReplicas
 	statefulSet.Spec.Template = restoreTemplate
 	statefulSet.Spec.UpdateStrategy = restoreStrategy
+	statefulSet.Spec.ReserveOrdinals = restoreReserveOrdinals
 
 	allErrs = append(allErrs, apivalidation.ValidateNonnegativeField(int64(*statefulSet.Spec.Replicas), field.NewPath("spec", "replicas"))...)
 	return allErrs
-}
-
-func convertPodTemplateSpec(template *v1.PodTemplateSpec) (*core.PodTemplateSpec, error) {
-	coreTemplate := &core.PodTemplateSpec{}
-	if err := corev1.Convert_v1_PodTemplateSpec_To_core_PodTemplateSpec(template.DeepCopy(), coreTemplate, nil); err != nil {
-		return nil, err
-	}
-	return coreTemplate, nil
 }
 
 func validateTemplateInPlaceOnly(oldTemp, newTemp *v1.PodTemplateSpec) error {

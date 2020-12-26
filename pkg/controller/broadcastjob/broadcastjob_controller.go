@@ -26,12 +26,14 @@ import (
 
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	"github.com/openkruise/kruise/pkg/util/gate"
+	"github.com/openkruise/kruise/pkg/util/ratelimiter"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/tools/record"
@@ -47,6 +49,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
+
+	"github.com/openkruise/kruise/pkg/util/expectations"
 )
 
 func init() {
@@ -61,6 +65,7 @@ const (
 var (
 	concurrentReconciles = 3
 	controllerKind       = appsv1alpha1.SchemeGroupVersion.WithKind("BroadcastJob")
+	scaleExpectations    = expectations.NewScaleExpectations()
 )
 
 // Add creates a new BroadcastJob Controller and adds it to the Manager with default RBAC. The Manager will set fields on the Controller
@@ -85,7 +90,9 @@ func newReconciler(mgr manager.Manager) reconcile.Reconciler {
 // add adds a new Controller to mgr with r as the reconcile.Reconciler
 func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	// Create a new controller
-	c, err := controller.New("broadcastjob-controller", mgr, controller.Options{Reconciler: r, MaxConcurrentReconciles: concurrentReconciles})
+	c, err := controller.New("broadcastjob-controller", mgr, controller.Options{
+		Reconciler: r, MaxConcurrentReconciles: concurrentReconciles,
+		RateLimiter: ratelimiter.DefaultControllerRateLimiter()})
 	if err != nil {
 		return err
 	}
@@ -96,16 +103,18 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 		return err
 	}
 
-	err = c.Watch(&source.Kind{Type: &corev1.Pod{}}, &handler.EnqueueRequestForOwner{
-		IsController: true,
-		OwnerType:    &appsv1alpha1.BroadcastJob{},
+	// Wathc for changes to Pod
+	err = c.Watch(&source.Kind{Type: &corev1.Pod{}}, &podEventHandler{
+		enqueueHandler: handler.EnqueueRequestForOwner{
+			IsController: true,
+			OwnerType:    &appsv1alpha1.BroadcastJob{},
+		},
 	})
-
 	if err != nil {
 		return err
 	}
 
-	// Watch for changes to Pod
+	// Watch for changes to Node
 	if err = c.Watch(&source.Kind{Type: &corev1.Node{}}, &enqueueBroadcastJobForNode{client: mgr.GetClient()}); err != nil {
 		return err
 	}
@@ -140,12 +149,23 @@ func (r *ReconcileBroadcastJob) Reconcile(request reconcile.Request) (reconcile.
 		if errors.IsNotFound(err) {
 			// Object not found, return.  Created objects are automatically garbage collected.
 			// For additional cleanup logic use finalizers.
+			scaleExpectations.DeleteExpectations(request.String())
 			return reconcile.Result{}, nil
 		}
 		// Error reading the object - requeue the request.
 		klog.Errorf("failed to get job %s,", job.Name)
 		return reconcile.Result{}, err
 	}
+
+	if scaleSatisfied, unsatisfiedDuration, scaleDirtyPods := scaleExpectations.SatisfiedExpectations(request.String()); !scaleSatisfied {
+		if unsatisfiedDuration >= expectations.ExpectationTimeout {
+			klog.Warningf("Expectation unsatisfied overtime for bcj %v, scaleDirtyPods=%v, overtime=%v", request.String(), scaleDirtyPods, unsatisfiedDuration)
+			return reconcile.Result{}, nil
+		}
+		klog.V(4).Infof("Not satisfied scale for bcj %v, scaleDirtyPods=%v", request.String(), scaleDirtyPods)
+		return reconcile.Result{RequeueAfter: expectations.ExpectationTimeout - unsatisfiedDuration}, nil
+	}
+
 	// Add pre-defined labels to pod template
 	addLabelToPodTemplate(job)
 
@@ -235,7 +255,7 @@ func (r *ReconcileBroadcastJob) Reconcile(request reconcile.Request) (reconcile.
 		job.Status.Phase = appsv1alpha1.PhasePaused
 		return reconcile.Result{RequeueAfter: requeueAfter}, r.updateJobStatus(request, job)
 	}
-	if job.Spec.Paused == false && job.Status.Phase == appsv1alpha1.PhasePaused {
+	if !job.Spec.Paused && job.Status.Phase == appsv1alpha1.PhasePaused {
 		job.Status.Phase = appsv1alpha1.PhaseRunning
 		r.recorder.Event(job, corev1.EventTypeNormal, "Continue", "continue to process job")
 	}
@@ -407,7 +427,7 @@ func (r *ReconcileBroadcastJob) reconcilePods(job *appsv1alpha1.BroadcastJob,
 					defer wait.Done()
 					// parallelize pod creation
 					klog.Infof("creating pod on node %s", nodeName)
-					err := r.createPodsOnNode(nodeName, job.Namespace, &job.Spec.Template, job, asOwner(job))
+					err := r.createPodOnNode(nodeName, job.Namespace, &job.Spec.Template, job, asOwner(job))
 					if err != nil && errors.IsTimeout(err) {
 						// Pod is created but its initialization has timed out.
 						// If the initialization is successful eventually, the
@@ -562,6 +582,7 @@ func labelsAsMap(job *appsv1alpha1.BroadcastJob) map[string]string {
 //   - PodMatchNodeSelector: checks pod's NodeSelector and NodeAffinity against node
 //   - PodToleratesNodeTaints: exclude tainted node unless pod has specific toleration
 //   - CheckNodeUnschedulablePredicate: check if the pod can tolerate node unschedulable
+//   - PodFitsResources: checks if a node has sufficient resources, such as cpu, memory, gpu, opaque int resources etc to run a pod.
 func checkNodeFitness(pod *corev1.Pod, node *corev1.Node) (bool, error) {
 	nodeInfo := schedulernodeinfo.NewNodeInfo()
 	_ = nodeInfo.SetNode(node)
@@ -585,6 +606,11 @@ func checkNodeFitness(pod *corev1.Pod, node *corev1.Node) (bool, error) {
 	}
 
 	fit, reasons, err = predicates.CheckNodeUnschedulablePredicate(pod, nil, nodeInfo)
+	if err != nil || !fit {
+		logPredicateFailedReason(reasons, node)
+		return false, err
+	}
+	fit, reasons, err = predicates.PodFitsResources(pod, nil, nodeInfo)
 	if err != nil || !fit {
 		logPredicateFailedReason(reasons, node)
 		return false, err
@@ -619,7 +645,10 @@ func (r *ReconcileBroadcastJob) deleteJobPods(job *appsv1alpha1.BroadcastJob, po
 	for i := int32(0); i < int32(nbPods); i++ {
 		go func(ix int32) {
 			defer wait.Done()
+			key := types.NamespacedName{Namespace: job.Namespace, Name: job.Name}.String()
+			scaleExpectations.ExpectScale(key, expectations.Delete, pods[ix].Spec.NodeName)
 			if err := r.Delete(context.TODO(), pods[ix]); err != nil {
+				scaleExpectations.ObserveScale(key, expectations.Delete, pods[ix].Spec.NodeName)
 				defer utilruntime.HandleError(err)
 				klog.Infof("Failed to delete %v, job %q/%q", pods[ix].Name, job.Namespace, job.Name)
 				errCh <- err
@@ -641,14 +670,14 @@ func (r *ReconcileBroadcastJob) deleteJobPods(job *appsv1alpha1.BroadcastJob, po
 	return failed, active, manageJobErr
 }
 
-func (r *ReconcileBroadcastJob) createPodsOnNode(nodeName, namespace string, template *corev1.PodTemplateSpec, object runtime.Object, controllerRef *metav1.OwnerReference) error {
+func (r *ReconcileBroadcastJob) createPodOnNode(nodeName, namespace string, template *corev1.PodTemplateSpec, object runtime.Object, controllerRef *metav1.OwnerReference) error {
 	if err := validateControllerRef(controllerRef); err != nil {
 		return err
 	}
-	return r.createPods(nodeName, namespace, template, object, controllerRef)
+	return r.createPod(nodeName, namespace, template, object, controllerRef)
 }
 
-func (r *ReconcileBroadcastJob) createPods(nodeName, namespace string, template *corev1.PodTemplateSpec, object runtime.Object, controllerRef *metav1.OwnerReference) error {
+func (r *ReconcileBroadcastJob) createPod(nodeName, namespace string, template *corev1.PodTemplateSpec, object runtime.Object, controllerRef *metav1.OwnerReference) error {
 	pod, err := kubecontroller.GetPodFromTemplate(template, object, controllerRef)
 	if err != nil {
 		return err
@@ -665,7 +694,13 @@ func (r *ReconcileBroadcastJob) createPods(nodeName, namespace string, template 
 	if r.podModifier != nil {
 		r.podModifier(pod)
 	}
+
+	key := types.NamespacedName{Namespace: namespace, Name: controllerRef.Name}.String()
+	// Pod.Name is empty since the Pod uses generated name. We use nodeName as the unique identity
+	// since each node should only contain one job Pod.
+	scaleExpectations.ExpectScale(key, expectations.Create, nodeName)
 	if err := r.Client.Create(context.TODO(), pod); err != nil {
+		scaleExpectations.ObserveScale(key, expectations.Create, nodeName)
 		r.recorder.Eventf(object, corev1.EventTypeWarning, kubecontroller.FailedCreatePodReason, "Error creating: %v", err)
 		return err
 	}
