@@ -26,6 +26,7 @@ import (
 	"github.com/openkruise/kruise/pkg/client"
 	kruiseclientset "github.com/openkruise/kruise/pkg/client/clientset/versioned"
 	kruiseappslisters "github.com/openkruise/kruise/pkg/client/listers/apps/v1beta1"
+	"github.com/openkruise/kruise/pkg/util"
 	"github.com/openkruise/kruise/pkg/util/expectations"
 	"github.com/openkruise/kruise/pkg/util/gate"
 	"github.com/openkruise/kruise/pkg/util/inplaceupdate"
@@ -65,7 +66,7 @@ var (
 	controllerKind       = appsv1beta1.SchemeGroupVersion.WithKind("StatefulSet")
 	concurrentReconciles = 3
 
-	updateExpectations = expectations.NewUpdateExpectations(func(o metav1.Object) string {
+	updateExpectations = expectations.NewUpdateExpectations(func(controllerKey string, o metav1.Object) string {
 		p := o.(*v1.Pod)
 		return getPodRevision(p)
 	})
@@ -110,8 +111,7 @@ func newReconciler(mgr manager.Manager) (reconcile.Reconciler, error) {
 	podLister := corelisters.NewPodLister(podInformer.(toolscache.SharedIndexInformer).GetIndexer())
 	pvcLister := corelisters.NewPersistentVolumeClaimLister(pvcInformer.(toolscache.SharedIndexInformer).GetIndexer())
 
-	genericClient := client.GetGenericClient()
-	//recorder := mgr.GetRecorder("statefulset-controller")
+	genericClient := client.GetGenericClientWithName("statefulset-controller")
 	eventBroadcaster := record.NewBroadcaster()
 	eventBroadcaster.StartLogging(klog.Infof)
 	eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: genericClient.KubeClient.CoreV1().Events("")})
@@ -126,7 +126,7 @@ func newReconciler(mgr manager.Manager) (reconcile.Reconciler, error) {
 				podLister,
 				pvcLister,
 				recorder),
-			inplaceupdate.New(mgr.GetClient(), appsv1.ControllerRevisionHashLabelKey),
+			inplaceupdate.New(util.NewClientFromManager(mgr, "statefulset-controller"), appsv1.ControllerRevisionHashLabelKey),
 			NewRealStatefulSetStatusUpdater(genericClient.KruiseClient, statefulSetLister),
 			history.NewHistory(genericClient.KubeClient, appslisters.NewControllerRevisionLister(revInformer.(toolscache.SharedIndexInformer).GetIndexer())),
 			recorder,

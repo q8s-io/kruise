@@ -20,6 +20,7 @@ import (
 	appspub "github.com/openkruise/kruise/apis/apps/pub"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	v1 "k8s.io/kubernetes/pkg/apis/core/v1"
 	utilpointer "k8s.io/utils/pointer"
@@ -27,25 +28,42 @@ import (
 
 // SetDefaults_SidecarSet set default values for SidecarSet.
 func SetDefaultsSidecarSet(obj *SidecarSet) {
-	setSidecarSetUpdateStratety(&obj.Spec.Strategy)
+	setSidecarSetUpdateStratety(&obj.Spec.UpdateStrategy)
 
 	for i := range obj.Spec.InitContainers {
 		setSidecarDefaultContainer(&obj.Spec.InitContainers[i])
 	}
 
 	for i := range obj.Spec.Containers {
-		setSidecarDefaultContainer(&obj.Spec.Containers[i])
+		setDefaultSidecarContainer(&obj.Spec.Containers[i])
 	}
 }
 
-func setSidecarSetUpdateStratety(strategy *SidecarSetUpdateStrategy) {
-	if strategy.RollingUpdate == nil {
-		rollingUpdate := RollingUpdateSidecarSet{}
-		strategy.RollingUpdate = &rollingUpdate
+func setDefaultSidecarContainer(sidecarContainer *SidecarContainer) {
+	if sidecarContainer.PodInjectPolicy == "" {
+		sidecarContainer.PodInjectPolicy = BeforeAppContainerType
 	}
-	if strategy.RollingUpdate.MaxUnavailable == nil {
+	if sidecarContainer.UpgradeStrategy.UpgradeType == "" {
+		sidecarContainer.UpgradeStrategy.UpgradeType = SidecarContainerColdUpgrade
+	}
+	if sidecarContainer.ShareVolumePolicy.Type == "" {
+		sidecarContainer.ShareVolumePolicy.Type = ShareVolumePolicyDisabled
+	}
+
+	setSidecarDefaultContainer(sidecarContainer)
+}
+
+func setSidecarSetUpdateStratety(strategy *SidecarSetUpdateStrategy) {
+	if strategy.Type == "" {
+		strategy.Type = NotUpdateSidecarSetStrategyType
+	}
+	if strategy.MaxUnavailable == nil {
 		maxUnavailable := intstr.FromInt(1)
-		strategy.RollingUpdate.MaxUnavailable = &maxUnavailable
+		strategy.MaxUnavailable = &maxUnavailable
+	}
+	if strategy.Partition == nil {
+		partition := intstr.FromInt(0)
+		strategy.Partition = &partition
 	}
 }
 
@@ -451,5 +469,48 @@ func SetDefaultPodSpec(in *corev1.PodSpec) {
 				}
 			}
 		}
+	}
+}
+
+// SetDefaults_NodeImage set default values for NodeImage.
+func SetDefaultsNodeImage(obj *NodeImage) {
+	now := metav1.Now()
+	for name, imageSpec := range obj.Spec.Images {
+		for i := range imageSpec.Tags {
+			tagSpec := &imageSpec.Tags[i]
+			if tagSpec.CreatedAt == nil {
+				tagSpec.CreatedAt = &now
+			}
+			if tagSpec.PullPolicy == nil {
+				tagSpec.PullPolicy = &ImageTagPullPolicy{}
+			}
+			SetDefaultsImageTagPullPolicy(tagSpec.PullPolicy)
+		}
+		obj.Spec.Images[name] = imageSpec
+	}
+}
+
+func SetDefaultsImageTagPullPolicy(obj *ImageTagPullPolicy) {
+	if obj.TimeoutSeconds == nil {
+		obj.TimeoutSeconds = utilpointer.Int32Ptr(600)
+	}
+	if obj.BackoffLimit == nil {
+		obj.TimeoutSeconds = utilpointer.Int32Ptr(3)
+	}
+}
+
+// SetDefaults_ImagePullJob set default values for ImagePullJob.
+func SetDefaultsImagePullJob(obj *ImagePullJob) {
+	if obj.Spec.CompletionPolicy.Type == "" {
+		obj.Spec.CompletionPolicy.Type = Always
+	}
+	if obj.Spec.PullPolicy == nil {
+		obj.Spec.PullPolicy = &PullPolicy{}
+	}
+	if obj.Spec.PullPolicy.TimeoutSeconds != nil {
+		obj.Spec.PullPolicy.TimeoutSeconds = utilpointer.Int32Ptr(600)
+	}
+	if obj.Spec.PullPolicy.BackoffLimit != nil {
+		obj.Spec.PullPolicy.BackoffLimit = utilpointer.Int32Ptr(3)
 	}
 }

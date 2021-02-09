@@ -12,16 +12,21 @@ COPY go.sum go.sum
 # Copy the go source
 COPY main.go main.go
 COPY apis/ apis/
+COPY cmd/ cmd/
 COPY pkg/ pkg/
 COPY vendor/ vendor/
 
 # Build
-RUN CGO_ENABLED=0 GO111MODULE=on go build -mod=vendor -a -o manager main.go
+RUN CGO_ENABLED=0 GO111MODULE=on go build -mod=vendor -a -o manager main.go \
+  && CGO_ENABLED=0 GO111MODULE=on go build -mod=vendor -a -o daemon ./cmd/daemon/main.go
 
 # Use distroless as minimal base image to package the manager binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
 #FROM gcr.io/distroless/static:nonroot
 FROM ubuntu:latest
+# This is required by daemon connnecting with cri
+RUN apt-get update -y && apt-get install ca-certificates -y && rm -rf /var/lib/apt/lists/*
 WORKDIR /
 COPY --from=builder /workspace/manager .
+COPY --from=builder /workspace/daemon ./kruise-daemon
 ENTRYPOINT ["/manager"]

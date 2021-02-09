@@ -25,6 +25,8 @@ import (
 	"time"
 
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
+	"github.com/openkruise/kruise/pkg/util"
+	"github.com/openkruise/kruise/pkg/util/expectations"
 	"github.com/openkruise/kruise/pkg/util/gate"
 	"github.com/openkruise/kruise/pkg/util/ratelimiter"
 	corev1 "k8s.io/api/core/v1"
@@ -40,6 +42,7 @@ import (
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog"
 	kubecontroller "k8s.io/kubernetes/pkg/controller"
+	daemonsetutil "k8s.io/kubernetes/pkg/controller/daemon/util"
 	"k8s.io/kubernetes/pkg/scheduler/algorithm/predicates"
 	schedulernodeinfo "k8s.io/kubernetes/pkg/scheduler/nodeinfo"
 	"k8s.io/utils/integer"
@@ -49,11 +52,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
-
-	"github.com/openkruise/kruise/pkg/util/expectations"
 )
 
 func init() {
+	flag.BoolVar(&scheduleBroadcastJobPods, "assign-bcj-pods-by-scheduler", true, "Use scheduler to assign broadcastJob pod to node.")
 	flag.IntVar(&concurrentReconciles, "broadcastjob-workers", concurrentReconciles, "Max concurrent workers for BroadCastJob controller.")
 }
 
@@ -63,9 +65,10 @@ const (
 )
 
 var (
-	concurrentReconciles = 3
-	controllerKind       = appsv1alpha1.SchemeGroupVersion.WithKind("BroadcastJob")
-	scaleExpectations    = expectations.NewScaleExpectations()
+	concurrentReconciles     = 3
+	scheduleBroadcastJobPods bool
+	controllerKind           = appsv1alpha1.SchemeGroupVersion.WithKind("BroadcastJob")
+	scaleExpectations        = expectations.NewScaleExpectations()
 )
 
 // Add creates a new BroadcastJob Controller and adds it to the Manager with default RBAC. The Manager will set fields on the Controller
@@ -81,7 +84,7 @@ func Add(mgr manager.Manager) error {
 func newReconciler(mgr manager.Manager) reconcile.Reconciler {
 	recorder := mgr.GetEventRecorderFor("broadcastjob-controller")
 	return &ReconcileBroadcastJob{
-		Client:   mgr.GetClient(),
+		Client:   util.NewClientFromManager(mgr, "broadcastjob-controller"),
 		scheme:   mgr.GetScheme(),
 		recorder: recorder,
 	}
@@ -115,7 +118,7 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	}
 
 	// Watch for changes to Node
-	if err = c.Watch(&source.Kind{Type: &corev1.Node{}}, &enqueueBroadcastJobForNode{client: mgr.GetClient()}); err != nil {
+	if err = c.Watch(&source.Kind{Type: &corev1.Node{}}, &enqueueBroadcastJobForNode{reader: mgr.GetCache()}); err != nil {
 		return err
 	}
 	return nil
@@ -683,8 +686,15 @@ func (r *ReconcileBroadcastJob) createPod(nodeName, namespace string, template *
 		return err
 	}
 	pod.Namespace = namespace
-	if len(nodeName) != 0 {
-		pod.Spec.NodeName = nodeName
+	if scheduleBroadcastJobPods {
+		// The pod's NodeAffinity will be updated to make sure the Pod is bound
+		// to the target node by default scheduler. It is safe to do so because there
+		// should be no conflicting node affinity with the target node.
+		pod.Spec.Affinity = daemonsetutil.ReplaceDaemonSetPodNodeNameNodeAffinity(pod.Spec.Affinity, nodeName)
+	} else {
+		if len(nodeName) != 0 {
+			pod.Spec.NodeName = nodeName
+		}
 	}
 	if labels.Set(pod.Labels).AsSelectorPreValidated().Empty() {
 		return fmt.Errorf("unable to create pods, no labels")

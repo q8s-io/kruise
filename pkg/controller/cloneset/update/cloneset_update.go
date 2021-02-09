@@ -96,7 +96,7 @@ func (c *realControl) Manage(cs *appsv1alpha1.CloneSet,
 			continue
 		}
 
-		if clonesetutils.GetPodRevision(pods[i]) != updateRevision.Name {
+		if clonesetutils.GetPodRevision("", pods[i]) != updateRevision.Name {
 			switch lifecycle.GetPodLifecycleState(pods[i]) {
 			case appspub.LifecycleStatePreparingDelete, appspub.LifecycleStateUpdated:
 				klog.V(3).Infof("CloneSet %s/%s find pod %s in state %s, so skip to update it",
@@ -160,7 +160,7 @@ func (c *realControl) refreshPodState(cs *appsv1alpha1.CloneSet, coreControl clo
 	case appspub.LifecycleStateUpdated:
 		if cs.Spec.Lifecycle == nil ||
 			cs.Spec.Lifecycle.InPlaceUpdate == nil ||
-			lifecycle.IsPodHooked(cs.Spec.Lifecycle.InPlaceUpdate, pod) {
+			lifecycle.IsPodAllHooked(cs.Spec.Lifecycle.InPlaceUpdate, pod) {
 			state = appspub.LifecycleStateNormal
 		}
 	}
@@ -259,22 +259,30 @@ func (c *realControl) updatePod(cs *appsv1alpha1.CloneSet, coreControl clonesetc
 		cs.Spec.UpdateStrategy.Type == appsv1alpha1.InPlaceOnlyCloneSetUpdateStrategyType {
 		var oldRevision *apps.ControllerRevision
 		for _, r := range revisions {
-			if r.Name == clonesetutils.GetPodRevision(pod) {
+			if r.Name == clonesetutils.GetPodRevision("", pod) {
 				oldRevision = r
 				break
 			}
 		}
 
 		if c.inplaceControl.CanUpdateInPlace(oldRevision, updateRevision, coreControl.GetUpdateOptions()) {
-			if cs.Spec.Lifecycle != nil && lifecycle.IsPodHooked(cs.Spec.Lifecycle.InPlaceUpdate, pod) {
-				if patched, err := lifecycle.PatchPodLifecycle(c, pod, appspub.LifecycleStatePreparingUpdate); err != nil {
-					return 0, err
-				} else if patched {
+			switch state := lifecycle.GetPodLifecycleState(pod); state {
+			case "", appspub.LifecycleStateNormal:
+				var err error
+				var patched bool
+				if patched, err = lifecycle.PatchPodLifecycle(c, pod, appspub.LifecycleStatePreparingUpdate); err == nil && patched {
 					clonesetutils.ResourceVersionExpectations.Expect(pod)
 					klog.V(3).Infof("CloneSet %s patch pod %s lifecycle to PreparingUpdate",
 						clonesetutils.GetControllerKey(cs), pod.Name)
 				}
-				return 0, nil
+				return 0, err
+			case appspub.LifecycleStatePreparingUpdate:
+				if cs.Spec.Lifecycle != nil && lifecycle.IsPodHooked(cs.Spec.Lifecycle.InPlaceUpdate, pod) {
+					return 0, nil
+				}
+			case appspub.LifecycleStateUpdating:
+			default:
+				return 0, fmt.Errorf("not allowed to in-place update pod %s in state %s", pod.Name, state)
 			}
 
 			opts := coreControl.GetUpdateOptions()

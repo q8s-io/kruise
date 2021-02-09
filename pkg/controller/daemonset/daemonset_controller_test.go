@@ -30,6 +30,7 @@ import (
 	kruisefake "github.com/openkruise/kruise/pkg/client/clientset/versioned/fake"
 	kruiseinformers "github.com/openkruise/kruise/pkg/client/informers/externalversions"
 	kruiseappsinformers "github.com/openkruise/kruise/pkg/client/informers/externalversions/apps/v1alpha1"
+	"github.com/openkruise/kruise/pkg/util"
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -281,8 +282,8 @@ func TestReconcile(t *testing.T) {
 	// channel when it is finished.
 	mgr, err := manager.New(cfg, manager.Options{})
 	g.Expect(err).NotTo(gomega.HaveOccurred())
-	c = mgr.GetClient()
-	err = client.NewRegistry(mgr)
+	c = util.NewClientFromManager(mgr, "test-daemonset-controller")
+	err = client.NewRegistry(mgr.GetConfig())
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 
 	set := newDaemonSet("test")
