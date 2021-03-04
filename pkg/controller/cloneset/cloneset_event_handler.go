@@ -21,9 +21,6 @@ import (
 	"reflect"
 	"strings"
 
-	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
-	clonesetutils "github.com/openkruise/kruise/pkg/controller/cloneset/utils"
-	"github.com/openkruise/kruise/pkg/util/expectations"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -35,6 +32,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
+	clonesetutils "github.com/openkruise/kruise/pkg/controller/cloneset/utils"
+	"github.com/openkruise/kruise/pkg/util/expectations"
 )
 
 type podEventHandler struct {
@@ -46,8 +47,8 @@ var _ handler.EventHandler = &podEventHandler{}
 func (e *podEventHandler) Create(evt event.CreateEvent, q workqueue.RateLimitingInterface) {
 	pod := evt.Object.(*v1.Pod)
 	if pod.DeletionTimestamp != nil {
-		// on a restart of the controller manager, it's possible a new pod shows up in a state that
-		// is already pending deletion. Prevent the pod from being a creation observation.
+		// on a restart of the controller manager, it's possible a new pod shows up in a state that is already pending deletion.
+		// Prevent the pod from being a creation observation.
 		e.Delete(event.DeleteEvent{Meta: evt.Meta, Object: evt.Object}, q)
 		return
 	}
@@ -64,10 +65,9 @@ func (e *podEventHandler) Create(evt event.CreateEvent, q workqueue.RateLimiting
 		return
 	}
 
-	// Otherwise, it's an orphan. Get a list of all matching CloneSets and sync
-	// them to see if anyone wants to adopt it.
-	// DO NOT observe creation because no controller should be waiting for an
-	// orphan.
+	// Otherwise, it's an orphan.
+	// Get a list of all matching CloneSets and sync them to see if anyone wants to adopt it.
+	// DO NOT observe creation because no controller should be waiting for an orphan.
 	csList := e.getPodCloneSets(pod)
 	if len(csList) == 0 {
 		return
@@ -93,11 +93,9 @@ func (e *podEventHandler) Update(evt event.UpdateEvent, q workqueue.RateLimiting
 
 	labelChanged := !reflect.DeepEqual(curPod.Labels, oldPod.Labels)
 	if curPod.DeletionTimestamp != nil {
-		// when a pod is deleted gracefully it's deletion timestamp is first modified to reflect a grace period,
-		// and after such time has passed, the kubelet actually deletes it from the store. We receive an update
-		// for modification of the deletion timestamp and expect an rs to create more replicas asap, not wait
-		// until the kubelet actually deletes the pod. This is different from the Phase of a pod changing, because
-		// an rs never initiates a phase change, and so is never asleep waiting for the same.
+		// when a pod is deleted gracefully it's deletion timestamp is first modified to reflect a grace period, and after such time has passed, the kubelet actually deletes it from the store.
+		// We receive an update for modification of the deletion timestamp and expect an rs to create more replicas asap, not wait until the kubelet actually deletes the pod.
+		// This is different from the Phase of a pod changing, because an rs never initiates a phase change, and so is never asleep waiting for the same.
 		e.Delete(event.DeleteEvent{Meta: evt.MetaNew, Object: evt.ObjectNew}, q)
 		if labelChanged {
 			// we don't need to check the oldPod.DeletionTimestamp because DeletionTimestamp cannot be unset.
@@ -127,8 +125,8 @@ func (e *podEventHandler) Update(evt event.UpdateEvent, q workqueue.RateLimiting
 		return
 	}
 
-	// Otherwise, it's an orphan. If anything changed, sync matching controllers
-	// to see if anyone wants to adopt it now.
+	// Otherwise, it's an orphan.
+	// If anything changed, sync matching controllers to see if anyone wants to adopt it now.
 	if labelChanged || controllerRefChanged {
 		csList := e.getPodCloneSets(curPod)
 		if len(csList) == 0 {

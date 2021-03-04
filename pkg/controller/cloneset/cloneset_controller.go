@@ -22,19 +22,6 @@ import (
 	"flag"
 	"time"
 
-	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
-	kruiseclient "github.com/openkruise/kruise/pkg/client"
-	clonesetcore "github.com/openkruise/kruise/pkg/controller/cloneset/core"
-	revisioncontrol "github.com/openkruise/kruise/pkg/controller/cloneset/revision"
-	scalecontrol "github.com/openkruise/kruise/pkg/controller/cloneset/scale"
-	updatecontrol "github.com/openkruise/kruise/pkg/controller/cloneset/update"
-	clonesetutils "github.com/openkruise/kruise/pkg/controller/cloneset/utils"
-	"github.com/openkruise/kruise/pkg/util/expectations"
-	"github.com/openkruise/kruise/pkg/util/fieldindex"
-	"github.com/openkruise/kruise/pkg/util/gate"
-	historyutil "github.com/openkruise/kruise/pkg/util/history"
-	"github.com/openkruise/kruise/pkg/util/ratelimiter"
-	"github.com/openkruise/kruise/pkg/util/refmanager"
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -54,47 +41,52 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
+
+	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
+	kruiseclient "github.com/openkruise/kruise/pkg/client"
+	clonesetcore "github.com/openkruise/kruise/pkg/controller/cloneset/core"
+	revisioncontrol "github.com/openkruise/kruise/pkg/controller/cloneset/revision"
+	scalecontrol "github.com/openkruise/kruise/pkg/controller/cloneset/scale"
+	updatecontrol "github.com/openkruise/kruise/pkg/controller/cloneset/update"
+	clonesetutils "github.com/openkruise/kruise/pkg/controller/cloneset/utils"
+	"github.com/openkruise/kruise/pkg/util/expectations"
+	"github.com/openkruise/kruise/pkg/util/fieldindex"
+	"github.com/openkruise/kruise/pkg/util/gate"
+	historyutil "github.com/openkruise/kruise/pkg/util/history"
+	"github.com/openkruise/kruise/pkg/util/ratelimiter"
+	"github.com/openkruise/kruise/pkg/util/refmanager"
+)
+
+// ReconcileCloneSet reconciles a CloneSet object
+type ReconcileCloneSet struct {
+	client.Client
+	scheme            *runtime.Scheme
+	reconcileFunc     func(request reconcile.Request) (reconcile.Result, error)
+	recorder          record.EventRecorder
+	controllerHistory history.Interface
+	statusUpdater     StatusUpdater
+	revisionControl   revisioncontrol.Interface
+	scaleControl      scalecontrol.Interface
+	updateControl     updatecontrol.Interface
+}
+
+var _ reconcile.Reconciler = &ReconcileCloneSet{}
+
+var (
+	concurrentReconciles = 3
 )
 
 func init() {
 	flag.IntVar(&concurrentReconciles, "cloneset-workers", concurrentReconciles, "Max concurrent workers for CloneSet controller.")
 }
 
-var (
-	concurrentReconciles = 3
-)
-
-// Add creates a new CloneSet Controller and adds it to the Manager with default RBAC. The Manager will set fields on the Controller
-// and Start it when the Manager is Started.
+// Add creates a new CloneSet Controller and adds it to the Manager with default RBAC.
+// The Manager will set fields on the Controller and Start it when the Manager is Started.
 func Add(mgr manager.Manager) error {
 	if !gate.ResourceEnabled(&appsv1alpha1.CloneSet{}) {
 		return nil
 	}
 	return add(mgr, newReconciler(mgr))
-}
-
-// newReconciler returns a new reconcile.Reconciler
-func newReconciler(mgr manager.Manager) reconcile.Reconciler {
-	_ = fieldindex.RegisterFieldIndexes(mgr.GetCache())
-	recorder := mgr.GetEventRecorderFor("cloneset-controller")
-	if cli := kruiseclient.GetGenericClient(); cli != nil {
-		eventBroadcaster := record.NewBroadcaster()
-		eventBroadcaster.StartLogging(klog.Infof)
-		eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: cli.KubeClient.CoreV1().Events("")})
-		recorder = eventBroadcaster.NewRecorder(mgr.GetScheme(), v1.EventSource{Component: "cloneset-controller"})
-	}
-	reconciler := &ReconcileCloneSet{
-		Client:            mgr.GetClient(),
-		scheme:            mgr.GetScheme(),
-		recorder:          recorder,
-		statusUpdater:     newStatusUpdater(mgr.GetClient()),
-		controllerHistory: historyutil.NewHistory(mgr.GetClient()),
-		revisionControl:   revisioncontrol.NewRevisionControl(),
-	}
-	reconciler.scaleControl = scalecontrol.New(mgr.GetClient(), reconciler.recorder)
-	reconciler.updateControl = updatecontrol.New(mgr.GetClient(), reconciler.recorder)
-	reconciler.reconcileFunc = reconciler.doReconcile
-	return reconciler
 }
 
 // add adds a new Controller to mgr with r as the reconcile.Reconciler
@@ -138,20 +130,28 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	return nil
 }
 
-var _ reconcile.Reconciler = &ReconcileCloneSet{}
-
-// ReconcileCloneSet reconciles a CloneSet object
-type ReconcileCloneSet struct {
-	client.Client
-	scheme        *runtime.Scheme
-	reconcileFunc func(request reconcile.Request) (reconcile.Result, error)
-
-	recorder          record.EventRecorder
-	controllerHistory history.Interface
-	statusUpdater     StatusUpdater
-	revisionControl   revisioncontrol.Interface
-	scaleControl      scalecontrol.Interface
-	updateControl     updatecontrol.Interface
+// newReconciler returns a new reconcile.Reconciler
+func newReconciler(mgr manager.Manager) reconcile.Reconciler {
+	_ = fieldindex.RegisterFieldIndexes(mgr.GetCache())
+	recorder := mgr.GetEventRecorderFor("cloneset-controller")
+	if cli := kruiseclient.GetGenericClient(); cli != nil {
+		eventBroadcaster := record.NewBroadcaster()
+		eventBroadcaster.StartLogging(klog.Infof)
+		eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: cli.KubeClient.CoreV1().Events("")})
+		recorder = eventBroadcaster.NewRecorder(mgr.GetScheme(), v1.EventSource{Component: "cloneset-controller"})
+	}
+	reconciler := &ReconcileCloneSet{
+		Client:            mgr.GetClient(),
+		scheme:            mgr.GetScheme(),
+		recorder:          recorder,
+		statusUpdater:     newStatusUpdater(mgr.GetClient()),
+		controllerHistory: historyutil.NewHistory(mgr.GetClient()),
+		revisionControl:   revisioncontrol.NewRevisionControl(),
+	}
+	reconciler.reconcileFunc = reconciler.doReconcile
+	reconciler.scaleControl = scalecontrol.New(mgr.GetClient(), reconciler.recorder)
+	reconciler.updateControl = updatecontrol.New(mgr.GetClient(), reconciler.recorder)
+	return reconciler
 }
 
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
@@ -162,14 +162,14 @@ type ReconcileCloneSet struct {
 // +kubebuilder:rbac:groups=apps.kruise.io,resources=clonesets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps.kruise.io,resources=clonesets/status,verbs=get;update;patch
 
-// Reconcile reads that state of the cluster for a CloneSet object and makes changes based on the state read
-// and what is in the CloneSet.Spec
+// Reconcile reads that state of the cluster for a CloneSet object and makes changes based on the state read and what is in the CloneSet.Spec
 func (r *ReconcileCloneSet) Reconcile(request reconcile.Request) (reconcile.Result, error) {
 	return r.reconcileFunc(request)
 }
 
 func (r *ReconcileCloneSet) doReconcile(request reconcile.Request) (res reconcile.Result, retErr error) {
 	startTime := time.Now()
+
 	defer func() {
 		if retErr == nil {
 			if res.Requeue || res.RequeueAfter > 0 {
@@ -184,10 +184,12 @@ func (r *ReconcileCloneSet) doReconcile(request reconcile.Request) (res reconcil
 
 	// Fetch the CloneSet instance
 	instance := &appsv1alpha1.CloneSet{}
+
 	err := r.Get(context.TODO(), request.NamespacedName, instance)
 	if err != nil {
+		// Object not found, return.
 		if errors.IsNotFound(err) {
-			// Object not found, return.  Created objects are automatically garbage collected.
+			// Created objects are automatically garbage collected.
 			// For additional cleanup logic use finalizers.
 			klog.V(3).Infof("CloneSet %s has been deleted.", request)
 			clonesetutils.ScaleExpectations.DeleteExpectations(request.String())
@@ -198,6 +200,7 @@ func (r *ReconcileCloneSet) doReconcile(request reconcile.Request) (res reconcil
 	}
 
 	coreControl := clonesetcore.New(instance)
+
 	if coreControl.IsInitializing() {
 		klog.V(4).Infof("CloneSet %s skip reconcile for initializing", request)
 		return reconcile.Result{}, nil
@@ -226,7 +229,7 @@ func (r *ReconcileCloneSet) doReconcile(request reconcile.Request) (res reconcil
 		return reconcile.Result{}, err
 	}
 
-	//release Pods ownerRef
+	// release Pods ownerRef
 	filteredPods, err = r.claimPods(instance, filteredPods)
 	if err != nil {
 		return reconcile.Result{}, err
@@ -353,7 +356,6 @@ func (r *ReconcileCloneSet) syncCloneSet(
 			err = podsUpdateErr
 		}
 	}
-
 	return delayDuration, err
 }
 
@@ -384,14 +386,13 @@ func (r *ReconcileCloneSet) getActiveRevisions(cs *appsv1alpha1.CloneSet, revisi
 		// if the equivalent revision is immediately prior the update revision has not changed
 		updateRevision = revisions[revisionCount-1]
 	} else if equalCount > 0 {
-		// if the equivalent revision is not immediately prior we will roll back by incrementing the
-		// Revision of the equivalent revision
+		// if the equivalent revision is not immediately prior we will roll back by incrementing the Revision of the equivalent revision
 		updateRevision, err = r.controllerHistory.UpdateControllerRevision(equalRevisions[equalCount-1], updateRevision.Revision)
 		if err != nil {
 			return nil, nil, collisionCount, err
 		}
 	} else {
-		//if there is no equivalent revision we create a new one
+		// if there is no equivalent revision we create a new one
 		updateRevision, err = r.controllerHistory.CreateControllerRevision(cs, updateRevision, &collisionCount)
 		if err != nil {
 			return nil, nil, collisionCount, err
@@ -469,11 +470,12 @@ func (r *ReconcileCloneSet) truncatePodsToDelete(cs *appsv1alpha1.CloneSet, pods
 	return r.Update(context.TODO(), newCS)
 }
 
-// truncateHistory truncates any non-live ControllerRevisions in revisions from cs's history. The UpdateRevision and
-// CurrentRevision in cs's Status are considered to be live. Any revisions associated with the Pods in pods are also
-// considered to be live. Non-live revisions are deleted, starting with the revision with the lowest Revision, until
-// only RevisionHistoryLimit revisions remain. If the returned error is nil the operation was successful. This method
-// expects that revisions is sorted when supplied.
+// truncateHistory truncates any non-live ControllerRevisions in revisions from cs's history.
+// The UpdateRevision and CurrentRevision in cs's Status are considered to be live.
+// Any revisions associated with the Pods in pods are also considered to be live.
+// Non-live revisions are deleted, starting with the revision with the lowest Revision, until only RevisionHistoryLimit revisions remain.
+// If the returned error is nil the operation was successful.
+// This method expects that revisions is sorted when supplied.
 func (r *ReconcileCloneSet) truncateHistory(
 	cs *appsv1alpha1.CloneSet,
 	pods []*v1.Pod,

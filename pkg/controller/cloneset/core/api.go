@@ -17,9 +17,10 @@ limitations under the License.
 package core
 
 import (
+	v1 "k8s.io/api/core/v1"
+
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	"github.com/openkruise/kruise/pkg/util/inplaceupdate"
-	v1 "k8s.io/api/core/v1"
 )
 
 type Control interface {

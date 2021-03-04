@@ -1,6 +1,6 @@
 module github.com/openkruise/kruise
 
-go 1.13
+go 1.14
 
 require (
 	github.com/appscode/jsonpatch v1.0.1
@@ -29,6 +29,7 @@ require (
 
 // Replace to match K8s 1.16
 replace (
+	github.com/prometheus/client_golang => github.com/prometheus/client_golang v0.9.2
 	k8s.io/api => k8s.io/api v0.16.6
 	k8s.io/apiextensions-apiserver => k8s.io/apiextensions-apiserver v0.16.6
 	k8s.io/apimachinery => k8s.io/apimachinery v0.16.6
@@ -51,5 +52,3 @@ replace (
 	k8s.io/metrics => k8s.io/metrics v0.16.6
 	k8s.io/sample-apiserver => k8s.io/sample-apiserver v0.16.6
 )
-
-replace github.com/prometheus/client_golang => github.com/prometheus/client_golang v0.9.2

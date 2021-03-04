@@ -20,7 +20,14 @@ import (
 	"fmt"
 	"sort"
 	"time"
-
+	
+	apps "k8s.io/api/apps/v1"
+	v1 "k8s.io/api/core/v1"
+	intstrutil "k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/tools/record"
+	"k8s.io/klog"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	
 	appspub "github.com/openkruise/kruise/apis/apps/pub"
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	clonesetcore "github.com/openkruise/kruise/pkg/controller/cloneset/core"
@@ -30,12 +37,6 @@ import (
 	"github.com/openkruise/kruise/pkg/util/requeueduration"
 	"github.com/openkruise/kruise/pkg/util/specifieddelete"
 	"github.com/openkruise/kruise/pkg/util/updatesort"
-	apps "k8s.io/api/apps/v1"
-	v1 "k8s.io/api/core/v1"
-	intstrutil "k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/client-go/tools/record"
-	"k8s.io/klog"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // Interface for managing pods updating.
@@ -308,27 +309,27 @@ func (c *realControl) updatePod(cs *appsv1alpha1.CloneSet, coreControl clonesetc
 		clonesetutils.ResourceVersionExpectations.Expect(pod)
 	}
 
-	//clonesetutils.ScaleExpectations.ExpectScale(clonesetutils.GetControllerKey(cs), expectations.Delete, pod.Name)
-	//if err := c.Delete(context.TODO(), pod); err != nil {
-	//	clonesetutils.ScaleExpectations.ObserveScale(clonesetutils.GetControllerKey(cs), expectations.Delete, pod.Name)
-	//	c.recorder.Eventf(cs, v1.EventTypeWarning, "FailedUpdatePodReCreate",
-	//		"failed to delete pod %s for update: %v", pod.Name, err)
-	//	return 0, err
-	//}
+	// clonesetutils.ScaleExpectations.ExpectScale(clonesetutils.GetControllerKey(cs), expectations.Delete, pod.Name)
+	// if err := c.Delete(context.TODO(), pod); err != nil {
+	// 	clonesetutils.ScaleExpectations.ObserveScale(clonesetutils.GetControllerKey(cs), expectations.Delete, pod.Name)
+	// 	c.recorder.Eventf(cs, v1.EventTypeWarning, "FailedUpdatePodReCreate",
+	// 		"failed to delete pod %s for update: %v", pod.Name, err)
+	// 	return 0, err
+	// }
 	//
-	//// TODO(FillZpp): add a strategy controlling if the PVCs of this pod should be deleted
-	//for _, pvc := range pvcs {
-	//	if pvc.Labels[appsv1alpha1.CloneSetInstanceID] != pod.Labels[appsv1alpha1.CloneSetInstanceID] {
-	//		continue
-	//	}
+	// // TODO(FillZpp): add a strategy controlling if the PVCs of this pod should be deleted
+	// for _, pvc := range pvcs {
+	// 	if pvc.Labels[appsv1alpha1.CloneSetInstanceID] != pod.Labels[appsv1alpha1.CloneSetInstanceID] {
+	// 		continue
+	// 	}
 	//
-	//	clonesetutils.ScaleExpectations.ExpectScale(clonesetutils.GetControllerKey(cs), expectations.Delete, pvc.Name)
-	//	if err := c.Delete(context.TODO(), pvc); err != nil {
-	//		clonesetutils.ScaleExpectations.ObserveScale(clonesetutils.GetControllerKey(cs), expectations.Delete, pvc.Name)
-	//		c.recorder.Eventf(cs, v1.EventTypeWarning, "FailedDelete", "failed to delete pvc %s: %v", pvc.Name, err)
-	//		return 0, err
-	//	}
-	//}
+	// 	clonesetutils.ScaleExpectations.ExpectScale(clonesetutils.GetControllerKey(cs), expectations.Delete, pvc.Name)
+	// 	if err := c.Delete(context.TODO(), pvc); err != nil {
+	// 		clonesetutils.ScaleExpectations.ObserveScale(clonesetutils.GetControllerKey(cs), expectations.Delete, pvc.Name)
+	// 		c.recorder.Eventf(cs, v1.EventTypeWarning, "FailedDelete", "failed to delete pvc %s: %v", pvc.Name, err)
+	// 		return 0, err
+	// 	}
+	// }
 
 	c.recorder.Eventf(cs, v1.EventTypeNormal, "SuccessfulUpdatePodReCreate",
 		"successfully patch pod %s specified-delete for update(revision %s)", pod.Name, updateRevision.Name)

@@ -19,14 +19,15 @@ package cloneset
 import (
 	"context"
 
-	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
-	clonesetcore "github.com/openkruise/kruise/pkg/controller/cloneset/core"
-	clonesetutils "github.com/openkruise/kruise/pkg/controller/cloneset/utils"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
+	clonesetcore "github.com/openkruise/kruise/pkg/controller/cloneset/core"
+	clonesetutils "github.com/openkruise/kruise/pkg/controller/cloneset/utils"
 )
 
 // StatusUpdater is interface for updating CloneSet status.
@@ -51,7 +52,6 @@ func (r *realStatusUpdater) UpdateCloneSetStatus(cs *appsv1alpha1.CloneSet, newS
 			return err
 		}
 	}
-
 	return clonesetcore.New(cs).ExtraStatusCalculation(newStatus, pods)
 }
 

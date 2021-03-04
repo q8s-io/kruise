@@ -17,22 +17,6 @@ const (
 	Delete ScaleAction = "delete"
 )
 
-// ScaleExpectations is an interface that allows users to set and wait on expectations of pods scale.
-type ScaleExpectations interface {
-	ExpectScale(controllerKey string, action ScaleAction, name string)
-	ObserveScale(controllerKey string, action ScaleAction, name string)
-	SatisfiedExpectations(controllerKey string) (bool, time.Duration, map[ScaleAction][]string)
-	DeleteExpectations(controllerKey string)
-	GetExpectations(controllerKey string) map[ScaleAction]sets.String
-}
-
-// NewScaleExpectations returns a common ScaleExpectations.
-func NewScaleExpectations() ScaleExpectations {
-	return &realScaleExpectations{
-		controllerCache: make(map[string]*realControllerScaleExpectations),
-	}
-}
-
 type realScaleExpectations struct {
 	sync.Mutex
 	// key: parent key, workload namespace/name
@@ -43,6 +27,22 @@ type realControllerScaleExpectations struct {
 	// item: name for this object
 	objsCache                 map[ScaleAction]sets.String
 	firstUnsatisfiedTimestamp time.Time
+}
+
+// ScaleExpectations is an interface that allows users to set and wait on expectations of pods scale.
+type ScaleExpectations interface {
+	GetExpectations(controllerKey string) map[ScaleAction]sets.String
+	ExpectScale(controllerKey string, action ScaleAction, name string)
+	ObserveScale(controllerKey string, action ScaleAction, name string)
+	SatisfiedExpectations(controllerKey string) (bool, time.Duration, map[ScaleAction][]string)
+	DeleteExpectations(controllerKey string)
+}
+
+// NewScaleExpectations returns a common ScaleExpectations.
+func NewScaleExpectations() ScaleExpectations {
+	return &realScaleExpectations{
+		controllerCache: make(map[string]*realControllerScaleExpectations),
+	}
 }
 
 func (r *realScaleExpectations) GetExpectations(controllerKey string) map[ScaleAction]sets.String {

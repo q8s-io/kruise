@@ -95,7 +95,7 @@ func main() {
 		})
 	}
 
-	//ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
+	// ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 	ctrl.SetLogger(klogr.New())
 
 	cfg := ctrl.GetConfigOrDie()

@@ -257,6 +257,7 @@ func (r *ReconcileSidecarSet) updateSidecarImageAndHash(sidecarSet *appsv1alpha1
 
 func (r *ReconcileSidecarSet) updatePodSidecarAndHash(sidecarSet *appsv1alpha1.SidecarSet, pod *corev1.Pod) error {
 	podClone := pod.DeepCopy()
+	
 	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		// update sidecar image
 		updatePodSidecar(sidecarSet, podClone)

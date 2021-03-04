@@ -20,9 +20,6 @@ import (
 	"context"
 	"flag"
 
-	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
-	"github.com/openkruise/kruise/pkg/util/gate"
-	"github.com/openkruise/kruise/pkg/util/ratelimiter"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -35,23 +32,22 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
+
+	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
+	"github.com/openkruise/kruise/pkg/util/gate"
+	"github.com/openkruise/kruise/pkg/util/ratelimiter"
+)
+
+var (
+	concurrentReconciles = 3
 )
 
 func init() {
 	flag.IntVar(&concurrentReconciles, "sidecarset-workers", concurrentReconciles, "Max concurrent workers for SidecarSet controller.")
 }
 
-var (
-	concurrentReconciles = 3
-)
-
-/**
-* USER ACTION REQUIRED: This is a scaffold file intended for the user to modify with their own Controller
-* business logic.  Delete these comments after modifying this file.*
- */
-
-// Add creates a new SidecarSet Controller and adds it to the Manager with default RBAC. The Manager will set fields on the Controller
-// and Start it when the Manager is Started.
+// Add creates a new SidecarSet Controller and adds it to the Manager with default RBAC.
+// The Manager will set fields on the Controller and Start it when the Manager is Started.
 func Add(mgr manager.Manager) error {
 	if !gate.ResourceEnabled(&appsv1alpha1.SidecarSet{}) {
 		return nil
@@ -88,19 +84,18 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	return nil
 }
 
-var _ reconcile.Reconciler = &ReconcileSidecarSet{}
-
 // ReconcileSidecarSet reconciles a SidecarSet object
 type ReconcileSidecarSet struct {
 	client.Client
 	scheme *runtime.Scheme
 }
 
+var _ reconcile.Reconciler = &ReconcileSidecarSet{}
+
 // +kubebuilder:rbac:groups=apps.kruise.io,resources=sidecarsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps.kruise.io,resources=sidecarsets/status,verbs=get;update;patch
 
-// Reconcile reads that state of the cluster for a SidecarSet object and makes changes based on the state read
-// and what is in the SidecarSet.Spec
+// Reconcile reads that state of the cluster for a SidecarSet object and makes changes based on the state read and what is in the SidecarSet.Spec
 func (r *ReconcileSidecarSet) Reconcile(request reconcile.Request) (reconcile.Result, error) {
 	// Fetch the SidecarSet instance
 	sidecarSet := &appsv1alpha1.SidecarSet{}
@@ -121,6 +116,7 @@ func (r *ReconcileSidecarSet) Reconcile(request reconcile.Request) (reconcile.Re
 	if err != nil {
 		return reconcile.Result{}, err
 	}
+
 	matchedPods := &corev1.PodList{}
 	if err := r.List(context.TODO(), matchedPods, &client.ListOptions{LabelSelector: selector}); err != nil {
 		return reconcile.Result{}, err
@@ -151,15 +147,11 @@ func (r *ReconcileSidecarSet) Reconcile(request reconcile.Request) (reconcile.Re
 
 	// update procedure:
 	// 1. check if sidecarset paused, if so, then quit
-	// 2. check if fields other than image in sidecarset had changed, if so, then quit
-	// 3. check unavailable pod number, if > 0, then quit(maxUnavailable=1)
-	// 4. find out pods need update
-	// 5. update one pod(maxUnavailable=1)
 	if sidecarSet.Spec.Paused {
 		klog.V(3).Infof("sidecarset %v is paused, skip update", sidecarSet.Name)
 		return reconcile.Result{}, nil
 	}
-
+	// 2. check if fields other than image in sidecarset had changed, if so, then quit
 	if len(filteredPods) == 0 {
 		return reconcile.Result{}, nil
 	}
@@ -171,7 +163,7 @@ func (r *ReconcileSidecarSet) Reconcile(request reconcile.Request) (reconcile.Re
 		klog.V(3).Infof("fields other than image in sidecarset %v had changed, skip update", sidecarSet.Name)
 		return reconcile.Result{}, nil
 	}
-
+	// 3. check unavailable pod number, if > 0, then quit(maxUnavailable=1)
 	unavailableNum, err := getUnavailableNumber(sidecarSet, filteredPods)
 	if err != nil {
 		return reconcile.Result{}, err
@@ -181,7 +173,7 @@ func (r *ReconcileSidecarSet) Reconcile(request reconcile.Request) (reconcile.Re
 		klog.V(3).Infof("current unavailable pod number: %v(max: %v), skip update", unavailableNum, maxUnavailableNum)
 		return reconcile.Result{}, nil
 	}
-
+	// 4. find out pods need update
 	var podsNeedUpdate []*corev1.Pod
 	for _, pod := range filteredPods {
 		isUpdated, err := isPodSidecarUpdated(sidecarSet, pod)
@@ -193,5 +185,6 @@ func (r *ReconcileSidecarSet) Reconcile(request reconcile.Request) (reconcile.Re
 		}
 	}
 	updateNum := maxUnavailableNum - unavailableNum
+	// 5. update one pod(maxUnavailable=1)
 	return reconcile.Result{}, r.updateSidecarImageAndHash(sidecarSet, podsNeedUpdate, updateNum)
 }
